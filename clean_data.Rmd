@@ -1,0 +1,333 @@
+---
+title: "Hospital Readmission: Data Cleaning"
+output: html_notebook
+---
+Source:
+https://archive.ics.uci.edu/ml/datasets/Diabetes+130-US+hospitals+for+years+1999-2008#
+
+Feature Explanation 
+https://www.hindawi.com/journals/bmri/2014/781670/tab1/
+
+```{r Libraries, include=FALSE}
+library(VIM)
+library(mice)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(tidyverse)
+library(comprehenr)
+library(fastDummies)
+```
+
+```{R Plot Missing Values Fxn}
+plot_missing <- function(A){
+  aggr_plot <- aggr(A,col=c('navyblue','red'),numbers=TRUE,sortVars=TRUE, 
+                    labels=names(A),cex.axis=.7,gap=3,
+                    ylab=c("Histogram of missing data","Pattern"))}
+```
+
+```{r Get Data, echo=FALSE}
+Dat <- subset(read.csv('diabetic_data.csv'),
+              select=-c(encounter_id,patient_nbr,# Cols irrelevant to analysis
+                        examide,citoglipton,metformin.rosiglitazone)) # only 1 level categorical
+
+numeric <- colnames(Dat[,c(3,4,8,11:16,20:20)])
+
+Dat[(Dat=='?')|(Dat=="PhysicianNotFound")] <- NA
+categorical <- colnames(Dat[,c(1,2,5:7,9,10,17:19,21:44)])
+names(Dat)
+```
+
+```{r Addressing Missing Values}
+plot_missing(Dat)
+
+Dat[rowSums(is.na(Dat))>0,]
+# No good way to impute missing race, primary dx -- rows dropped
+Dat <- Dat[!is.na(Dat$race),]
+Dat <- Dat[!is.na(Dat$diag_1),]
+
+# replacing missing secondary/tertiary diagnoses with none as category level
+Dat$diag_2[is.na(Dat$diag_2)]         <- 'none'
+Dat$diag_3[is.na(Dat$diag_3)]         <- 'none'
+Dat$payer_code[is.na(Dat$payer_code)] <- 'none'
+
+# one unknown gender, drop row
+Dat <- Dat[Dat$gender!='Unknown/Invalid',]
+
+plot_missing(Dat)
+```
+
+```{R Create Feature Matrix, Target Vector}
+y <- factor(Dat$readmitted,ordered=T,levels=c('<30','>30','NO'))
+X <- subset(Dat,select=-c(readmitted))
+X[,categorical] <- lapply(X[,categorical],factor)
+```
+
+```{R Create Numeric Feature Rates}
+X$lab_procedures_per_day <- X$num_lab_procedures/Dat$time_in_hospital
+X$procedures_per_day     <- X$num_procedures/Dat$time_in_hospital
+X$medications_per_day    <- X$num_medications/Dat$time_in_hospital
+
+numeric <- append(numeric,c('lab_procedures_per_day',
+                            'procedures_per_day',
+                            'medications_per_day'))
+```
+
+```{R Create DM Complications}
+ # Tried to add c('coma',25.3), but no positives in data
+complications <- list(c('dka',250.1),  c('hyperosmolarity',250.2),
+                      c('renal',250.4),c('neuro',250.6),c('vascular',250.7))
+
+temp_1 <- as.numeric(Dat$diag_1)
+temp_2 <- as.numeric(Dat$diag_2)
+temp_3 <- as.numeric(Dat$diag_3)
+
+for (comp in complications){
+  lower = as.numeric(comp[2])
+  upper = lower+0.09
+  X[comp[1]] <- as.factor(replace(rep(0,nrow(Dat)),
+                        ((between(temp_1,lower,upper))|
+                         (between(temp_2,lower,upper))|
+                         (between(temp_3,lower,upper))), 1))}
+
+categorical <- append(categorical,c('dka','hyperosmolarity',
+                                    'renal','neuro','vascular'))
+```
+
+```{R Create Pre-treated DM}
+dm_meds <- c("metformin","repaglinide","nateglinide","chlorpropamide",
+             "glimepiride","acetohexamide","glipizide","glyburide",             
+             "tolbutamide","pioglitazone","rosiglitazone","acarbose",                           
+             "miglitol","troglitazone","tolazamide","insulin",
+             "glyburide.metformin","glipizide.metformin",     
+             "glimepiride.pioglitazone","metformin.pioglitazone")
+
+no_meds <- rep("No",length(dm_meds))
+
+no_prior_meds <- function(row){
+  if (all(row=='No')){
+    return(1)}
+  else{
+    return(0)}}
+  
+X$prior_meds <- as.factor(apply(Dat[,dm_meds],1,no_prior_meds))
+```
+
+```{R Grouping Diagnoses Columns}
+injuries <- append(c(805:848,860:949,958:995),sprintf('E%d',800:999))
+
+diagnoses <- list(
+             id                    = to_vec(for(i in 1:139) toString(i)),
+             neoplasm_gi           = to_vec(for(i in c(140:149,
+                                                       150:159)) toString(i)),
+             neoplasm_resp         = to_vec(for(i in 160:165) toString(i)),
+             neoplasm_gu           = to_vec(for(i in 179:189) toString(i)),
+             neoplasm_other        = to_vec(for(i in c(170:176,190:209,235:239,
+                                                       230:234)) toString(i)),
+             neoplasm_benign       = to_vec(for(i in 210:229) toString(i)),
+                  
+             endocrine_dx          = to_vec(for(i in c(240:249,251:259,
+                                                       270:279)) toString(i)),
+             diabetes              = to_vec(for(i in 25000:25099) 
+                                                toString(i/100)),
+             heme_anemia           = to_vec(for(i in 280:285) toString(i)),
+             blood_dx_other        = to_vec(for(i in c(260:269,
+                                                       286:289)) toString(i)),
+                   
+             psychoses_organic     = to_vec(for(i in 290:294) toString(i)),
+             psychoses_other       = to_vec(for(i in 295:299) toString(i)),
+             psych_other           = to_vec(for(i in 300:319) toString(i)),
+                  
+             neuro_cns_other       = to_vec(for(i in c(320:327,
+                                                       338:349)) toString(i)),
+             neuro_cns_hereditary  = to_vec(for(i in 330:337) toString(i)),
+             neuro_other           = to_vec(for(i in c(350:389,
+                                                       "365.44")) toString(i)),
+                  
+              htn                  = to_vec(for(i in 401:405) toString(i)),
+              heart_dx_ischemic    = to_vec(for(i in 410:414) toString(i)),
+              pulm_circulation     = to_vec(for(i in 415:417) toString(i)),
+              heart_dx_other       = to_vec(for(i in c(390:398,
+                                                       420:429)) toString(i)),
+              cerebrovascular      = to_vec(for(i in 430:438) toString(i)),
+              arterial_dx          = to_vec(for(i in 440:449) toString(i)),
+              vascular_dx          = to_vec(for(i in 451:459) toString(i)),
+                  
+              resp_id_acute        = to_vec(for(i in 460:466) toString(i)),
+              resp_other           = to_vec(for(i in c(470:478,
+                                                       510:519)) toString(i)),
+              pna_flu              = to_vec(for(i in 480:488) toString(i)),
+              copd                 = to_vec(for(i in 490:496) toString(i)),
+              pneumoconioses       = to_vec(for(i in 500:508) toString(i)),
+                  
+              gi_upper_dx          = to_vec(for(i in 520:539) toString(i)),
+              enteritis            = to_vec(for(i in 555:558) toString(i)),
+              gi_other             = to_vec(for(i in c(540:543,550:553,
+                                                       560:579)) toString(i)),
+                  
+              neph_dx              = to_vec(for(i in 580:589) toString(i)),
+              gu_other             = to_vec(for(i in 590:599) toString(i)),
+              gu_male              = to_vec(for(i in 600:608) toString(i)),
+              gu_female            = to_vec(for(i in 610:629) toString(i)),
+                  
+              pregnancy_comp       = to_vec(for(i in c(630:649,660:669,
+                                                       670:679)) toString(i)),
+              pregnancy_normal     = to_vec(for(i in 650:659) toString(i)),
+                  
+              integument_id        = to_vec(for(i in 680:686) toString(i)),
+              integument_other     = to_vec(for(i in 690:709) toString(i)),
+                  
+              arthropathies        = to_vec(for(i in 710:719) toString(i)),
+              dorsopathies         = to_vec(for(i in 720:724) toString(i)),
+              rheumatism           = to_vec(for(i in 725:729) toString(i)),
+              osteopathies         = to_vec(for(i in 730:739) toString(i)),
+
+              general_sx_resp      = toString(786),
+              general_sx_other     = to_vec(for(i in c(740:779,780:789,
+                                                       787:799)) toString(i)),
+                  
+              injury_spine_head    = to_vec(for(i in c(800:804,850:854,
+                                                       950:957)) toString(i)),
+              injury_other         = injuries,
+              medical_complication = to_vec(for(i in 996:999) toString(i)),
+                  
+              outpatient           = sprintf('V%02d',1:91),
+              none = 'none')
+
+
+levels(X$diag_1) <- diagnoses
+levels(X$diag_2) <- diagnoses
+levels(X$diag_3) <- diagnoses
+```
+
+```{R Grouping Medical Specialty Column}
+specialties <- list(cardiology  =   'Cardiology',
+                    medicine    = c("InternalMedicine","Family/GeneralPractice",
+                                    "Gastroenterology","InfectiousDiseases",
+                                    "Pediatrics-CriticalCare","Pediatrics",
+                                    "Pathology","Pediatrics-InfectiousDiseases",
+                                    "Hospitalist","Resident"),
+                    surgery     = c("Surgery-General","Surgery-Neuro","Surgeon",
+                                    "Surgery-Cardiovascular/Thoracic",
+                                    "Surgery-Colon&Rectal","Surgery-Plastic",
+                                    "Surgery-Thoracic","Surgery-Maxillofacial",
+                                    "Surgery-PlasticwithinHeadandNeck",
+                                    "Surgery-Pediatric","Anesthesiology",
+                                    "Anesthesiology-Pediatric","Otolaryngology",
+                                    "Surgery-Vascular","Surgery-Cardiovascular",
+                                    "SurgicalSpecialty"),
+                    pulmonology = c("Pulmonology","Pediatrics-Pulmonology"),
+                    ortho       = c("Orthopedics-Reconstructive","Orthopedics",
+                                    "SportsMedicine"),
+                    nephrology  = c("Nephrology","Proctology"),
+                    psych       = c("Psychiatry","Psychiatry-Child/Adolescent",
+                                    "Psychology","Psychiatry-Addictive" ),
+                    emergency   = c("Pediatrics-EmergencyMedicine",
+                                    "Emergency/Trauma"),
+                    obgyn       = c("Obsterics&Gynecology-GynecologicOnco",
+                                    "Obstetrics","Gynecology",
+                                    "ObstetricsandGynecology"),
+                    hemeonc     = c("Hematology/Oncology","Hematology",
+                                    "Pediatrics-Hematology-Oncology",
+                                    "Oncology"),
+                    urology     =   "Urology",
+                    neurology   = c("Neurology","Pediatrics-Neurology"),
+                    radiology   = c("Radiology","Radiologist"),
+                    endocrine   = c("Endocrinology","Pediatrics-Endocrinology",
+                                    "Endocrinology-Metabolism"),
+                    rehab       =   "PhysicalMedicineandRehabilitation",
+                    other       = c("DCPTEAM","Podiatry","Dentistry","Speech",
+                                    "Dermatology","OutreachServices",
+                                    "Pediatrics-AllergyandImmunology",
+                                    "AllergyandImmunology","Osteopath",
+                                    "Rheumatology","Ophthalmology"))
+
+
+levels(X$medical_specialty) <- specialties
+```
+
+```{R Impute Medical Specialty}
+# Assign likely medical specialty based off of primary dx
+mapping <- c("id"="medicine","neoplasm_gi"="hemeonc","neoplasm_resp"="hemeonc",
+             "neoplasm_gu"="hemeonc","neoplasm_other"="hemeonc",
+             "neoplasm_benign"="hemeonc","endocrine_dx"="endocrine",
+             "diabetes"="endocrine","heme_anemia"="hemeonc",
+             "blood_dx_other"="hemeonc","psychoses_organic"="psych",
+             "psychoses_other"="psych","psych_other"="psych",
+             "neuro_cns_other"="neurology","neuro_cns_hereditary"="neurology",
+             "htn"="cardiology","neuro_other"="neurology",
+             "heart_dx_ischemic"="cardiology","pulm_circulation"="pulmonology",
+             "cerebrovascular"="neurology","heart_dx_other"="cardiology",
+             "arterial_dx"="cardiology","vascular_dx"="cardiology",
+             "resp_id_acute"="pulmonology","resp_other"="pulmonology",
+             "pna_flu"="pulmonology","copd"="pulmonology",
+             "pneumoconioses"="pulmonology","gi_upper_dx"="medicine",
+             "enteritis"="medicine","gi_other"="medicine","neph_dx"="medicine",
+             "gu_other"="urology","gu_male"="urology","gu_female"="urology",
+             "pregnancy_comp"="obgyn","pregnancy_normal"="obgyn",
+             "integument_id"="other","integument_other"="other",
+             "arthropathies"="ortho","dorsopathies"="ortho",
+             "rheumatism"="medicine","osteopathies"="medicine",
+             "general_sx_resp"="pulmonology","general_sx_other"="medicine",
+             "injury_other"='emergency',"injury_spine_head"='emergency',
+             "outpatient"="other","medical_complication"="medicine",
+             "none"="other")
+
+for (diagnosis in names(mapping)){
+  X$medical_specialty[is.na(X$medical_specialty) & 
+                      X$diag_1==diagnosis] <- mapping[diagnosis]}
+```
+
+```{R Margin Plots}
+marginplot(X[c('age','weight')])
+marginplot(X[c('diag_1','weight')])
+marginplot(X[c('gender','weight')])
+```
+
+```{R Impute Weight}
+# Use multiple imputation method based off of age, gender, & primary dx
+imputation_columns <- c('weight','age','gender','diag_1')
+
+init <- mice(X[imputation_columns],
+             nnet.MaxNWts=3000)
+imputed_X <- mice(X[imputation_columns],
+                  method='polr',
+                  predictorMatrix=init$predictorMatrix,
+                  nnet.MaxNWts=3000)
+X$weight <- complete(imputed_X)$weight
+```
+
+```{R Convert Ordered Categoricals to Numeric}
+X$weight <- mapvalues(X$weight,from=c("[0-25)","[25-50)","[50-75)","[75-100)",
+                                      "[100-125)","[125-150)","[150-175)",
+                                      "[175-200)",">200"), 
+                                 to=c(0:8)*25)
+
+X$age    <- mapvalues(X$age,from=c("[0-10)","[10-20)","[20-30)","[30-40)",
+                                   "[40-50)","[50-60)","[60-70)","[70-80)",
+                                   "[80-90)","[90-100)"), 
+                              to=c(1:10)*10)
+
+X[,c('age','weight')] <- lapply(X[,c('age','weight')],as.integer)
+```
+
+```{R Remove Special Characters from Col Names}
+# ('>' in column names causes errors in some models)
+X$A1Cresult <- mapvalues(X$A1Cresult,from=c('>8','>7',"Norm","None"), 
+                                       to=c('over_8','over_7',"Norm","None"))
+X$max_glu_serum <- mapvalues(X$max_glu_serum,from=c(">200",">300",
+                                                    "Norm","None"), 
+                                               to=c('over_200','over_300',
+                                                    "Norm","None"))
+```
+
+```{R Check for Missing Data}
+X <- X[,append(numeric,categorical)]
+plot_missing(X)
+```
+
+```{R Save}
+write.csv(X,'X.csv')
+write.csv(y,'y.csv')
+```
